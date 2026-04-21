@@ -309,6 +309,11 @@ html, body {
   background: linear-gradient(180deg, #f5d560, var(--label-yellow));
   color: #2a1f00;
 }
+.ctrl.secondary {
+  background: linear-gradient(180deg, #9aa3ad, #5b6672);
+  color: #0e1420;
+  border-color: #2a333f;
+}
 
 /* End-game overlay. */
 .end-overlay {

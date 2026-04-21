@@ -38,6 +38,7 @@ interface UiState {
   lastPlayerShot?: Coordinate;
   lastAiShot?: Coordinate;
   aiThinking: boolean;
+  viewingResults: boolean;
 }
 
 const AI_DELAY_MS = 650;
@@ -52,6 +53,7 @@ export class App {
     hover: null,
     status: "Setup — place your fleet",
     aiThinking: false,
+    viewingResults: false,
   };
   private sound = new SoundPlayer();
 
@@ -89,6 +91,7 @@ export class App {
       hover: null,
       status: "Setup — place your fleet",
       aiThinking: false,
+      viewingResults: false,
     };
     this.render();
   }
@@ -255,9 +258,15 @@ export class App {
 
     this.root.appendChild(shell);
 
-    if (this.game.phase === "ended") {
+    if (this.game.phase === "ended" && !this.ui.viewingResults) {
       this.root.appendChild(this.renderEndScreen());
     }
+  }
+
+  private viewResults() {
+    this.ui.viewingResults = true;
+    this.ui.status = "Enemy fleet revealed.";
+    this.render();
   }
 
   private renderEndScreen(): HTMLElement {
@@ -285,6 +294,12 @@ export class App {
     const again = this.controlButton("Play Again", () => this.newGame());
     again.classList.add("primary");
     card.appendChild(again);
+
+    if (!won) {
+      const results = this.controlButton("Results", () => this.viewResults());
+      results.classList.add("secondary");
+      card.appendChild(results);
+    }
 
     overlay.appendChild(card);
     return overlay;
@@ -325,7 +340,7 @@ export class App {
     const board = renderBoard({
       board: this.game.ai,
       side: "ai",
-      showShips: false,
+      showShips: this.ui.viewingResults,
       lastShot: this.ui.lastPlayerShot,
       onCellClick: (c) => this.onAiBoardCellClick(c),
       interactive: this.game.phase === "playing" && this.game.turn === "player" && !this.ui.aiThinking,
