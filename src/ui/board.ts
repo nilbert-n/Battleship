@@ -95,8 +95,17 @@ export function renderBoard(opts: BoardRenderOptions): HTMLElement {
 
       if (opts.interactive) {
         cell.addEventListener("click", () => opts.onCellClick?.(coord));
-        cell.addEventListener("mouseenter", () => opts.onCellHover?.(coord));
-        cell.addEventListener("mouseleave", () => opts.onCellHover?.(null));
+        // Use pointer events and skip hover preview on touch: on touch devices
+        // a tap simulates mouseenter -> click, and our hover handler re-renders
+        // the DOM, detaching the tapped cell before its click event fires.
+        cell.addEventListener("pointerenter", (e) => {
+          if (e.pointerType === "touch") return;
+          opts.onCellHover?.(coord);
+        });
+        cell.addEventListener("pointerleave", (e) => {
+          if (e.pointerType === "touch") return;
+          opts.onCellHover?.(null);
+        });
       } else {
         cell.disabled = true;
       }
