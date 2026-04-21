@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(npx vitest *)",
+      "Bash(npx vite *)",
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:5173/)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "mcp__Control_Chrome__open_url",
+      "mcp__Claude_Preview__preview_start"
+    ]
+  }
+}
