@@ -174,17 +174,16 @@ describe("ai targeting", () => {
   });
 
   it("skips hunt cells where no remaining ship can fit", () => {
-    // Box off rows 0-3 from the rest of the board with a horizontal wall of
-    // misses across row 4. Then sink every ship except the 5-cell carrier.
-    // Rows 0-3 hold a 4-row by 10-col window — only 4 contiguous cells in any
-    // column — so the carrier (length 5) cannot fit anywhere in that window.
-    // The AI must therefore not target any cell in rows 0-3.
+    // Sink every ship except the 5-cell carrier, then wall off rows 0-3 so
+    // the carrier cannot fit anywhere in that block:
+    //   - horizontal wall of misses across row 4 blocks all vertical runs of
+    //     length 5 that would have to cross row 4
+    //   - misses at cols 4 and 5 in each of rows 0-3 break every row in that
+    //     block into runs of at most 4 contiguous unshot cells
+    // Rows 5-9 remain wide-open, so the carrier has many valid placements
+    // there. The AI must therefore never target a cell in rows 0-3.
     let mem = createAiMemory(seededRng(31));
 
-    // Sink battleship (4), cruiser (3), submarine (3), destroyer (2). We
-    // mark the cells used as misses below; here we only adjust the ship
-    // length tracking via dummy sunk events that don't touch rows 0-3 or
-    // the wall.
     const sunkSpecs = [
       { length: 4, origin: { row: 9, col: 0 }, orientation: "horizontal" as const },
       { length: 3, origin: { row: 9, col: 4 }, orientation: "horizontal" as const },
@@ -192,7 +191,6 @@ describe("ai targeting", () => {
       { length: 2, origin: { row: 8, col: 0 }, orientation: "horizontal" as const },
     ];
     for (const spec of sunkSpecs) {
-      // Walk along each ship: hit each cell, then sink the last one.
       for (let i = 0; i < spec.length; i++) {
         const cell =
           spec.orientation === "horizontal"
@@ -216,17 +214,25 @@ describe("ai targeting", () => {
         });
       }
     }
-    // Wall off rows 0-3 with a row of misses across row 4.
+    // Vertical wall (blocks any vertical run of 5 crossing row 4).
     for (let c = 0; c < BOARD_SIZE; c++) {
       mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 4, col: c } });
+    }
+    // Horizontal breaks at cols 4 and 5 in rows 0-3 (max horizontal run of 4).
+    for (let r = 0; r < 4; r++) {
+      mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: r, col: 4 } });
+      mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: r, col: 5 } });
     }
 
     expect(mem.remainingShipLengths).toEqual([5]);
     expect(mem.mode).toBe("hunt");
-    const next = chooseAiShot(mem);
-    // Carrier (5) cannot fit in rows 0-3 since the column-direction has only
-    // 4 unshot cells (row 4 is a miss wall). So the AI must not target there.
-    expect(next.row).toBeGreaterThan(4);
+
+    // Repeated picks must always land outside rows 0-3, regardless of any
+    // tie-breaking behaviour: the carrier truly cannot fit there.
+    for (let i = 0; i < 5; i++) {
+      const next = chooseAiShot(mem);
+      expect(next.row).toBeGreaterThan(4);
+    }
   });
 
   it("shrinks remainingShipLengths when a ship is sunk", () => {
