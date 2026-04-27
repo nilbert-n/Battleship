@@ -60,11 +60,11 @@ describe("ai targeting", () => {
     expect(keys.size).toBe(shots.length);
   });
 
-  it("stays in hunt mode after a single isolated hit", () => {
+  it("switches to resolve after any open hit so leads are not abandoned", () => {
     let mem = createAiMemory(seededRng(9));
     const hit: Coordinate = { row: 4, col: 4 };
     mem = recordAiShotResult(mem, { outcome: "hit", coord: hit });
-    expect(mem.mode).toBe("hunt");
+    expect(mem.mode).toBe("resolve");
   });
 
   it("switches to resolve after two aligned hits and targets along orientation", () => {
@@ -99,14 +99,234 @@ describe("ai targeting", () => {
     expect(mem.mode).toBe("hunt");
   });
 
-  it("enters resolve when many clusters accumulate", () => {
+  it("stays in resolve while multiple isolated clusters are open", () => {
     let mem = createAiMemory(seededRng(17));
     mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 0, col: 0 } });
-    expect(mem.mode).toBe("hunt");
+    expect(mem.mode).toBe("resolve");
     mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 0, col: 5 } });
-    expect(mem.mode).toBe("hunt");
+    expect(mem.mode).toBe("resolve");
     mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 5, col: 0 } });
     expect(mem.mode).toBe("resolve");
+    expect(mem.clusters.length).toBe(3);
+  });
+
+  it("keeps resolving leftover hits after a neighboring ship is sunk", () => {
+    // Two ships placed orthogonally adjacent:
+    //   carrier (5) horizontal at row 0, cols 0..4
+    //   cruiser (3) vertical at col 0, rows 1..3
+    // AI hits B1 (col 1) first, then A1, then walks the cluster down into A2,
+    // A3, A4, sinking the cruiser. The remaining unsunk hits (A1, B1) belong
+    // to the carrier and the AI should keep resolving them, not drop back to
+    // random hunt.
+    let mem = createAiMemory(seededRng(23));
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 0, col: 1 } });
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 0, col: 0 } });
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 1, col: 0 } });
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 2, col: 0 } });
+    mem = recordAiShotResult(mem, {
+      outcome: "sunk",
+      coord: { row: 3, col: 0 },
+      sunkShip: {
+        type: "cruiser",
+        length: 3,
+        origin: { row: 1, col: 0 },
+        orientation: "vertical",
+        hits: [true, true, true],
+      },
+    });
+
+    expect(mem.remainingEnemyShips).toBe(4);
+    // Carrier hits at A1 and B1 must still be tracked.
+    const remaining = new Set(
+      mem.clusters.flatMap((c) => c.hits.map(coordKey)),
+    );
+    expect(remaining.has(coordKey({ row: 0, col: 0 }))).toBe(true);
+    expect(remaining.has(coordKey({ row: 0, col: 1 }))).toBe(true);
+    // With unsunk hits still on the board the AI must stay focused, not hunt.
+    expect(mem.mode).toBe("resolve");
+    const next = chooseAiShot(mem);
+    // The next shot must extend the carrier cluster, not be a random hunt.
+    const nextKey = coordKey(next);
+    const validFollowups = new Set(
+      [
+        { row: 0, col: 2 },
+        { row: 0, col: -1 }, // out of bounds; just for documentation
+      ].map(coordKey),
+    );
+    expect(validFollowups.has(nextKey)).toBe(true);
+  });
+
+  it("resolves an isolated single hit when it is the only open lead", () => {
+    let mem = createAiMemory(seededRng(29));
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 4, col: 4 } });
+    // An open hit must be followed up; the AI should not wander off.
+    expect(mem.mode).toBe("resolve");
+    const next = chooseAiShot(mem);
+    const neighborKeys = new Set(
+      [
+        { row: 3, col: 4 },
+        { row: 5, col: 4 },
+        { row: 4, col: 3 },
+        { row: 4, col: 5 },
+      ].map(coordKey),
+    );
+    expect(neighborKeys.has(coordKey(next))).toBe(true);
+  });
+
+  it("skips hunt cells where no remaining ship can fit", () => {
+    // Sink every ship except the 5-cell carrier, then wall off rows 0-3 so
+    // the carrier cannot fit anywhere in that block:
+    //   - horizontal wall of misses across row 4 blocks all vertical runs of
+    //     length 5 that would have to cross row 4
+    //   - misses at cols 4 and 5 in each of rows 0-3 break every row in that
+    //     block into runs of at most 4 contiguous unshot cells
+    // Rows 5-9 remain wide-open, so the carrier has many valid placements
+    // there. The AI must therefore never target a cell in rows 0-3.
+    let mem = createAiMemory(seededRng(31));
+
+    const sunkSpecs = [
+      { length: 4, origin: { row: 9, col: 0 }, orientation: "horizontal" as const },
+      { length: 3, origin: { row: 9, col: 4 }, orientation: "horizontal" as const },
+      { length: 3, origin: { row: 9, col: 7 }, orientation: "horizontal" as const },
+      { length: 2, origin: { row: 8, col: 0 }, orientation: "horizontal" as const },
+    ];
+    for (const spec of sunkSpecs) {
+      for (let i = 0; i < spec.length; i++) {
+        const cell =
+          spec.orientation === "horizontal"
+            ? { row: spec.origin.row, col: spec.origin.col + i }
+            : { row: spec.origin.row + i, col: spec.origin.col };
+        const isLast = i === spec.length - 1;
+        mem = recordAiShotResult(mem, {
+          outcome: isLast ? "sunk" : "hit",
+          coord: cell,
+          ...(isLast
+            ? {
+                sunkShip: {
+                  type: "destroyer",
+                  length: spec.length,
+                  origin: spec.origin,
+                  orientation: spec.orientation,
+                  hits: new Array(spec.length).fill(true),
+                },
+              }
+            : {}),
+        });
+      }
+    }
+    // Vertical wall (blocks any vertical run of 5 crossing row 4).
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 4, col: c } });
+    }
+    // Horizontal breaks at cols 4 and 5 in rows 0-3 (max horizontal run of 4).
+    for (let r = 0; r < 4; r++) {
+      mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: r, col: 4 } });
+      mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: r, col: 5 } });
+    }
+
+    expect(mem.remainingShipLengths).toEqual([5]);
+    expect(mem.mode).toBe("hunt");
+
+    // Repeated picks must always land outside rows 0-3, regardless of any
+    // tie-breaking behaviour: the carrier truly cannot fit there.
+    for (let i = 0; i < 5; i++) {
+      const next = chooseAiShot(mem);
+      expect(next.row).toBeGreaterThan(4);
+    }
+  });
+
+  it("shrinks remainingShipLengths when a ship is sunk", () => {
+    let mem = createAiMemory(seededRng(33));
+    expect(mem.remainingShipLengths).toEqual([5, 4, 3, 3, 2]);
+    mem = recordAiShotResult(mem, {
+      outcome: "sunk",
+      coord: { row: 0, col: 0 },
+      sunkShip: {
+        type: "destroyer",
+        length: 2,
+        origin: { row: 0, col: 0 },
+        orientation: "horizontal",
+        hits: [true, true],
+      },
+    });
+    expect(mem.remainingShipLengths).toEqual([5, 4, 3, 3]);
+    mem = recordAiShotResult(mem, {
+      outcome: "sunk",
+      coord: { row: 1, col: 0 },
+      sunkShip: {
+        type: "cruiser",
+        length: 3,
+        origin: { row: 1, col: 0 },
+        orientation: "horizontal",
+        hits: [true, true, true],
+      },
+    });
+    // Removes one of the 3s, not both.
+    expect(mem.remainingShipLengths).toEqual([5, 4, 3]);
+  });
+
+  it("keeps resolving when locked-orientation endpoints are exhausted but other open hits remain", () => {
+    // Reproduces the user-reported bug: two ships touching at right angles.
+    // A 3-cell cruiser sits horizontally at row 8 cols 2-4, and a 5-cell
+    // carrier sits horizontally at row 9 cols 1-5. They touch at (8,3)/(9,3)
+    // and (8,4)/(9,4) etc. The AI hits (8,3) then (8,4): cluster has 2
+    // collinear hits, orientation locks to horizontal. Both row-8 endpoints
+    // (8,1) and (8,5) miss (no ship there). Now the cluster is "stuck" along
+    // the locked axis but (8,3) and (8,4) sit directly above two carrier
+    // cells (9,3) and (9,4) that the AI hasn't tried. Before the fix the AI
+    // returned no resolve candidate and fell through to placement-density,
+    // firing far from the open cluster. The fix should keep AI in resolve
+    // mode, picking an orth neighbor of one of the two open hits.
+    let mem = createAiMemory(seededRng(101));
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 8, col: 3 } });
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 8, col: 4 } });
+    expect(mem.mode).toBe("resolve");
+    expect(mem.clusters[0].orientation).toBe("horizontal");
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 8, col: 2 } });
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 8, col: 5 } });
+
+    // Both locked-orientation endpoints are now misses. The cluster still
+    // has open hits at (8,3) and (8,4) — the AI must NOT abandon them.
+    expect(mem.mode).toBe("resolve");
+    const next = chooseAiShot(mem);
+    const validFollowups = new Set(
+      [
+        { row: 7, col: 3 },
+        { row: 7, col: 4 },
+        { row: 9, col: 3 },
+        { row: 9, col: 4 },
+      ].map(coordKey),
+    );
+    expect(validFollowups.has(coordKey(next))).toBe(true);
+  });
+
+  it("explores orth neighbors of every hit when cluster orientation is L-shaped", () => {
+    // Cluster of 3 hits forming an L (orientation = undefined). Pre-fix the
+    // AI only checked orth neighbors of hits[0]; if those were all shot the
+    // AI would give up and fall through to density mode. Post-fix it must
+    // check neighbors of every hit.
+    let mem = createAiMemory(seededRng(103));
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 5, col: 5 } });
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 5, col: 6 } });
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 6, col: 6 } });
+    // Block off all neighbors of (6,6) [the most-recent hit, hits[0]] except
+    // its already-shot neighbor (5,6).
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 7, col: 6 } });
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 6, col: 5 } });
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 6, col: 7 } });
+    expect(mem.mode).toBe("resolve");
+    const next = chooseAiShot(mem);
+    // The only valid resolve candidates are the unshot neighbors of (5,5)
+    // and (5,6): (4,5), (4,6), (5,4), (5,7).
+    const valid = new Set(
+      [
+        { row: 4, col: 5 },
+        { row: 4, col: 6 },
+        { row: 5, col: 4 },
+        { row: 5, col: 7 },
+      ].map(coordKey),
+    );
+    expect(valid.has(coordKey(next))).toBe(true);
   });
 
   it("enters resolve when few enemy ships remain", () => {

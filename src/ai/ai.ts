@@ -1,4 +1,11 @@
-import { Coordinate, Orientation, ShotResult, coordKey, inBounds } from "../engine/types";
+import {
+  BOARD_SIZE,
+  Coordinate,
+  Orientation,
+  ShotResult,
+  coordKey,
+  inBounds,
+} from "../engine/types";
 import { AiMemory, HitCluster } from "./types";
 import { buildHuntQueue } from "./huntQueue";
 
@@ -9,6 +16,7 @@ export function createAiMemory(rng: () => number = Math.random): AiMemory {
     clusters: [],
     shots: new Set(),
     remainingEnemyShips: 5,
+    remainingShipLengths: [5, 4, 3, 3, 2],
     mode: "hunt",
     rng,
   };
@@ -26,6 +34,7 @@ export function recordAiShotResult(memory: AiMemory, result: ShotResult): AiMemo
 
   let clusters = memory.clusters.map(cloneCluster);
   let remainingEnemyShips = memory.remainingEnemyShips;
+  let remainingShipLengths = memory.remainingShipLengths.slice();
 
   if (result.outcome === "hit" || result.outcome === "sunk") {
     const neighbors = orthogonalNeighbors(result.coord);
@@ -48,6 +57,9 @@ export function recordAiShotResult(memory: AiMemory, result: ShotResult): AiMemo
 
   if (result.outcome === "sunk" && result.sunkShip) {
     remainingEnemyShips = Math.max(0, remainingEnemyShips - 1);
+    const sunkLength = result.sunkShip.length;
+    const removeIdx = remainingShipLengths.indexOf(sunkLength);
+    if (removeIdx >= 0) remainingShipLengths.splice(removeIdx, 1);
     const sunkKeys = new Set(
       cellsForShip(result.sunkShip).map(coordKey),
     );
@@ -59,7 +71,14 @@ export function recordAiShotResult(memory: AiMemory, result: ShotResult): AiMemo
 
   const mode = decideMode(clusters, remainingEnemyShips);
 
-  return { ...memory, shots, clusters, remainingEnemyShips, mode };
+  return {
+    ...memory,
+    shots,
+    clusters,
+    remainingEnemyShips,
+    remainingShipLengths,
+    mode,
+  };
 }
 
 /**
@@ -74,19 +93,105 @@ export function chooseAiShot(memory: AiMemory): Coordinate {
     if (target) return target;
   }
 
+  const densityPick = pickByPlacementDensity(memory);
+  if (densityPick) return densityPick;
+
   for (let i = memory.huntIndex; i < memory.huntQueue.length; i++) {
     const candidate = memory.huntQueue[i];
     if (!memory.shots.has(coordKey(candidate))) return candidate;
   }
 
   // Fallback: scan all cells (should rarely be needed).
-  for (let r = 0; r < 10; r++) {
-    for (let c = 0; c < 10; c++) {
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
       const coord = { row: r, col: c };
       if (!memory.shots.has(coordKey(coord))) return coord;
     }
   }
   throw new Error("AI has no legal shots remaining");
+}
+
+/**
+ * Counts how many placements of each remaining (unsunk) ship cover each unshot
+ * cell, then returns the cell with the highest count. A "valid placement" is
+ * one whose every cell is in bounds and not already shot — the AI knows shot
+ * cells are either misses or part of an already-sunk ship, so no remaining
+ * ship can occupy them.
+ *
+ * This makes the AI ship-length-aware: when only the 5-cell carrier is left,
+ * a tightly-bordered region with fewer than 5 contiguous unshot cells gets
+ * count 0 and is skipped, so the AI stops wasting turns on impossible cells.
+ *
+ * Returns null if no valid placement exists (e.g., game is essentially over)
+ * so the caller can fall back to the legacy hunt queue.
+ */
+function pickByPlacementDensity(memory: AiMemory): Coordinate | null {
+  if (memory.remainingShipLengths.length === 0) return null;
+
+  const counts: number[][] = Array.from({ length: BOARD_SIZE }, () =>
+    new Array<number>(BOARD_SIZE).fill(0),
+  );
+
+  for (const length of memory.remainingShipLengths) {
+    // Horizontal placements
+    for (let r = 0; r < BOARD_SIZE; r++) {
+      for (let c = 0; c <= BOARD_SIZE - length; c++) {
+        if (placementBlocked(memory, r, c, length, "horizontal")) continue;
+        for (let i = 0; i < length; i++) counts[r][c + i]++;
+      }
+    }
+    // Vertical placements
+    for (let r = 0; r <= BOARD_SIZE - length; r++) {
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        if (placementBlocked(memory, r, c, length, "vertical")) continue;
+        for (let i = 0; i < length; i++) counts[r + i][c]++;
+      }
+    }
+  }
+
+  let bestCount = 0;
+  let bestCells: Coordinate[] = [];
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      if (memory.shots.has(coordKey({ row: r, col: c }))) continue;
+      const v = counts[r][c];
+      if (v > bestCount) {
+        bestCount = v;
+        bestCells = [{ row: r, col: c }];
+      } else if (v === bestCount && v > 0) {
+        bestCells.push({ row: r, col: c });
+      }
+    }
+  }
+  if (bestCount === 0 || bestCells.length === 0) return null;
+
+  // Prefer the candidate whose huntQueue index is smallest, so per-game
+  // randomness (queue is seeded) still influences tie-breaks.
+  const queueOrder = new Map<string, number>();
+  memory.huntQueue.forEach((c, i) => queueOrder.set(coordKey(c), i));
+  bestCells.sort((a, b) => {
+    const ai = queueOrder.get(coordKey(a)) ?? Number.POSITIVE_INFINITY;
+    const bi = queueOrder.get(coordKey(b)) ?? Number.POSITIVE_INFINITY;
+    return ai - bi;
+  });
+  return bestCells[0];
+}
+
+function placementBlocked(
+  memory: AiMemory,
+  r: number,
+  c: number,
+  length: number,
+  orientation: Orientation,
+): boolean {
+  for (let i = 0; i < length; i++) {
+    const cell =
+      orientation === "horizontal"
+        ? { row: r, col: c + i }
+        : { row: r + i, col: c };
+    if (memory.shots.has(coordKey(cell))) return true;
+  }
+  return false;
 }
 
 export function advanceHuntIndex(memory: AiMemory): AiMemory {
@@ -97,14 +202,12 @@ export function advanceHuntIndex(memory: AiMemory): AiMemory {
   return { ...memory, huntIndex: idx };
 }
 
-function decideMode(clusters: HitCluster[], remainingEnemyShips: number): "hunt" | "resolve" {
-  const anyAligned = clusters.some((c) => c.hits.length >= 2 && c.orientation);
-  const manyClusters = clusters.length >= 3;
-  const fewShipsLeft = remainingEnemyShips <= 2;
-  if (anyAligned || manyClusters || fewShipsLeft) {
-    if (clusters.length > 0) return "resolve";
-  }
-  return "hunt";
+function decideMode(clusters: HitCluster[], _remainingEnemyShips: number): "hunt" | "resolve" {
+  // Any open hit (cell that has been hit but whose ship has not been sunk) is
+  // an active lead. Always resolve before returning to random hunt — otherwise
+  // the AI can leave a partially-hit ship on the board and waste turns firing
+  // elsewhere.
+  return clusters.length > 0 ? "resolve" : "hunt";
 }
 
 function resolveTarget(memory: AiMemory): Coordinate | null {
@@ -120,25 +223,50 @@ function resolveTarget(memory: AiMemory): Coordinate | null {
   return null;
 }
 
+/**
+ * Produces candidate cells to extend an open cluster, in priority order:
+ *   1. If the cluster has a locked orientation (>=2 collinear hits), the two
+ *      collinear endpoints come first — the most likely continuations of a
+ *      single straight ship.
+ *   2. Then every orthogonal neighbor of every hit cell. This is the fallback
+ *      when the locked endpoints are already shot/out-of-bounds — which
+ *      happens when two ships are touching and the AI's hits span both
+ *      (cluster is locked along one axis, but the second ship extends off the
+ *      other axis). Without this fallback the AI returns no resolve target,
+ *      drops back to hunt mode, and starts firing far from the open hits.
+ *
+ * Duplicates are removed; the caller filters out shot/out-of-bounds cells.
+ */
 function clusterCandidates(cluster: HitCluster): Coordinate[] {
   if (cluster.hits.length === 0) return [];
-  if (cluster.orientation) {
+  const out: Coordinate[] = [];
+  const seen = new Set<string>();
+  const push = (c: Coordinate) => {
+    const k = coordKey(c);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(c);
+  };
+
+  if (cluster.orientation && cluster.hits.length >= 2) {
     const sorted = cluster.hits.slice().sort((a, b) =>
       cluster.orientation === "horizontal" ? a.col - b.col : a.row - b.row,
     );
     const first = sorted[0];
     const last = sorted[sorted.length - 1];
-    return cluster.orientation === "horizontal"
-      ? [
-          { row: first.row, col: first.col - 1 },
-          { row: last.row, col: last.col + 1 },
-        ]
-      : [
-          { row: first.row - 1, col: first.col },
-          { row: last.row + 1, col: last.col },
-        ];
+    if (cluster.orientation === "horizontal") {
+      push({ row: first.row, col: first.col - 1 });
+      push({ row: last.row, col: last.col + 1 });
+    } else {
+      push({ row: first.row - 1, col: first.col });
+      push({ row: last.row + 1, col: last.col });
+    }
   }
-  return orthogonalNeighbors(cluster.hits[0]);
+
+  for (const h of cluster.hits) {
+    for (const n of orthogonalNeighbors(h)) push(n);
+  }
+  return out;
 }
 
 function orthogonalNeighbors(c: Coordinate): Coordinate[] {
