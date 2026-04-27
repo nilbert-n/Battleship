@@ -97,14 +97,12 @@ export function advanceHuntIndex(memory: AiMemory): AiMemory {
   return { ...memory, huntIndex: idx };
 }
 
-function decideMode(clusters: HitCluster[], remainingEnemyShips: number): "hunt" | "resolve" {
-  const anyAligned = clusters.some((c) => c.hits.length >= 2 && c.orientation);
-  const manyClusters = clusters.length >= 3;
-  const fewShipsLeft = remainingEnemyShips <= 2;
-  if (anyAligned || manyClusters || fewShipsLeft) {
-    if (clusters.length > 0) return "resolve";
-  }
-  return "hunt";
+function decideMode(clusters: HitCluster[], _remainingEnemyShips: number): "hunt" | "resolve" {
+  // Any open hit (cell that has been hit but whose ship has not been sunk) is
+  // an active lead. Always resolve before returning to random hunt — otherwise
+  // the AI can leave a partially-hit ship on the board and waste turns firing
+  // elsewhere.
+  return clusters.length > 0 ? "resolve" : "hunt";
 }
 
 function resolveTarget(memory: AiMemory): Coordinate | null {
