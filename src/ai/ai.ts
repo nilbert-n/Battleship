@@ -223,25 +223,50 @@ function resolveTarget(memory: AiMemory): Coordinate | null {
   return null;
 }
 
+/**
+ * Produces candidate cells to extend an open cluster, in priority order:
+ *   1. If the cluster has a locked orientation (>=2 collinear hits), the two
+ *      collinear endpoints come first — the most likely continuations of a
+ *      single straight ship.
+ *   2. Then every orthogonal neighbor of every hit cell. This is the fallback
+ *      when the locked endpoints are already shot/out-of-bounds — which
+ *      happens when two ships are touching and the AI's hits span both
+ *      (cluster is locked along one axis, but the second ship extends off the
+ *      other axis). Without this fallback the AI returns no resolve target,
+ *      drops back to hunt mode, and starts firing far from the open hits.
+ *
+ * Duplicates are removed; the caller filters out shot/out-of-bounds cells.
+ */
 function clusterCandidates(cluster: HitCluster): Coordinate[] {
   if (cluster.hits.length === 0) return [];
-  if (cluster.orientation) {
+  const out: Coordinate[] = [];
+  const seen = new Set<string>();
+  const push = (c: Coordinate) => {
+    const k = coordKey(c);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(c);
+  };
+
+  if (cluster.orientation && cluster.hits.length >= 2) {
     const sorted = cluster.hits.slice().sort((a, b) =>
       cluster.orientation === "horizontal" ? a.col - b.col : a.row - b.row,
     );
     const first = sorted[0];
     const last = sorted[sorted.length - 1];
-    return cluster.orientation === "horizontal"
-      ? [
-          { row: first.row, col: first.col - 1 },
-          { row: last.row, col: last.col + 1 },
-        ]
-      : [
-          { row: first.row - 1, col: first.col },
-          { row: last.row + 1, col: last.col },
-        ];
+    if (cluster.orientation === "horizontal") {
+      push({ row: first.row, col: first.col - 1 });
+      push({ row: last.row, col: last.col + 1 });
+    } else {
+      push({ row: first.row - 1, col: first.col });
+      push({ row: last.row + 1, col: last.col });
+    }
   }
-  return orthogonalNeighbors(cluster.hits[0]);
+
+  for (const h of cluster.hits) {
+    for (const n of orthogonalNeighbors(h)) push(n);
+  }
+  return out;
 }
 
 function orthogonalNeighbors(c: Coordinate): Coordinate[] {

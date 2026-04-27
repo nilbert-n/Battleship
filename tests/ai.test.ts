@@ -265,6 +265,70 @@ describe("ai targeting", () => {
     expect(mem.remainingShipLengths).toEqual([5, 4, 3]);
   });
 
+  it("keeps resolving when locked-orientation endpoints are exhausted but other open hits remain", () => {
+    // Reproduces the user-reported bug: two ships touching at right angles.
+    // A 3-cell cruiser sits horizontally at row 8 cols 2-4, and a 5-cell
+    // carrier sits horizontally at row 9 cols 1-5. They touch at (8,3)/(9,3)
+    // and (8,4)/(9,4) etc. The AI hits (8,3) then (8,4): cluster has 2
+    // collinear hits, orientation locks to horizontal. Both row-8 endpoints
+    // (8,1) and (8,5) miss (no ship there). Now the cluster is "stuck" along
+    // the locked axis but (8,3) and (8,4) sit directly above two carrier
+    // cells (9,3) and (9,4) that the AI hasn't tried. Before the fix the AI
+    // returned no resolve candidate and fell through to placement-density,
+    // firing far from the open cluster. The fix should keep AI in resolve
+    // mode, picking an orth neighbor of one of the two open hits.
+    let mem = createAiMemory(seededRng(101));
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 8, col: 3 } });
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 8, col: 4 } });
+    expect(mem.mode).toBe("resolve");
+    expect(mem.clusters[0].orientation).toBe("horizontal");
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 8, col: 2 } });
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 8, col: 5 } });
+
+    // Both locked-orientation endpoints are now misses. The cluster still
+    // has open hits at (8,3) and (8,4) — the AI must NOT abandon them.
+    expect(mem.mode).toBe("resolve");
+    const next = chooseAiShot(mem);
+    const validFollowups = new Set(
+      [
+        { row: 7, col: 3 },
+        { row: 7, col: 4 },
+        { row: 9, col: 3 },
+        { row: 9, col: 4 },
+      ].map(coordKey),
+    );
+    expect(validFollowups.has(coordKey(next))).toBe(true);
+  });
+
+  it("explores orth neighbors of every hit when cluster orientation is L-shaped", () => {
+    // Cluster of 3 hits forming an L (orientation = undefined). Pre-fix the
+    // AI only checked orth neighbors of hits[0]; if those were all shot the
+    // AI would give up and fall through to density mode. Post-fix it must
+    // check neighbors of every hit.
+    let mem = createAiMemory(seededRng(103));
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 5, col: 5 } });
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 5, col: 6 } });
+    mem = recordAiShotResult(mem, { outcome: "hit", coord: { row: 6, col: 6 } });
+    // Block off all neighbors of (6,6) [the most-recent hit, hits[0]] except
+    // its already-shot neighbor (5,6).
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 7, col: 6 } });
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 6, col: 5 } });
+    mem = recordAiShotResult(mem, { outcome: "miss", coord: { row: 6, col: 7 } });
+    expect(mem.mode).toBe("resolve");
+    const next = chooseAiShot(mem);
+    // The only valid resolve candidates are the unshot neighbors of (5,5)
+    // and (5,6): (4,5), (4,6), (5,4), (5,7).
+    const valid = new Set(
+      [
+        { row: 4, col: 5 },
+        { row: 4, col: 6 },
+        { row: 5, col: 4 },
+        { row: 5, col: 7 },
+      ].map(coordKey),
+    );
+    expect(valid.has(coordKey(next))).toBe(true);
+  });
+
   it("enters resolve when few enemy ships remain", () => {
     let mem = createAiMemory(seededRng(19));
     // simulate 3 sinks to get down to 2 remaining
